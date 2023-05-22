@@ -6,8 +6,10 @@ localizer:
 labeler:
 	tinygo build -o bin/labeler -no-debug -panic=trap -scheduler=none -target wasi ./labeler
 
-run: build
-	./bin/runner ./bin/localizer
+.PHONY: validator
+validator:
+	tinygo build -o bin/validator -no-debug -panic=trap -scheduler=none -target wasi ./validator
 
-build: localizer
+.PHONY: runner
+runner:
 	go build -o ./bin/runner ./cmd/runner

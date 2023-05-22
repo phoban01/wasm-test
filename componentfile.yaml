@@ -1,0 +1,20 @@
+name: delivery.ocm.software/middleware
+version: v1.0.0
+provider:
+  name: phoban.io
+resources:
+- name: ocm-localizer
+  type: blob
+  input:
+    type: file
+    path: ./bin/localizer
+- name: ocm-labeler
+  type: blob
+  input:
+    type: file
+    path: ./bin/labeler
+- name: ocm-validator
+  type: blob
+  input:
+    type: file
+    path: ./bin/validator

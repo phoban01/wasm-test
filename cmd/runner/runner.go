@@ -15,6 +15,8 @@ import (
 	"github.com/mandelsoft/vfs/pkg/osfs"
 	"github.com/mandelsoft/vfs/pkg/projectionfs"
 	"github.com/open-component-model/ocm/pkg/common"
+	"github.com/open-component-model/ocm/pkg/common/accessio"
+	"github.com/open-component-model/ocm/pkg/contexts/oci/attrs/cacheattr"
 	"github.com/open-component-model/ocm/pkg/contexts/ocm"
 	"github.com/open-component-model/ocm/pkg/contexts/ocm/accessmethods/localblob"
 	"github.com/open-component-model/ocm/pkg/contexts/ocm/accessmethods/ociartifact"
@@ -22,7 +24,6 @@ import (
 	ocmmetav1 "github.com/open-component-model/ocm/pkg/contexts/ocm/compdesc/meta/v1"
 	"github.com/open-component-model/ocm/pkg/contexts/ocm/download/handlers/dirtree"
 	ocmreg "github.com/open-component-model/ocm/pkg/contexts/ocm/repositories/ocireg"
-	"github.com/open-component-model/ocm/pkg/runtime"
 	"github.com/tetratelabs/wazero"
 	"github.com/wapc/wapc-go"
 	wazeroEngine "github.com/wapc/wapc-go/engines/wazero"
@@ -34,17 +35,11 @@ func main() {
 	ctx := context.Background()
 	octx := ocm.ForContext(ctx)
 
-	data, err := os.ReadFile("/home/piaras/.ocmconfig")
+	cache, err := accessio.NewStaticBlobCache("/home/piaras/.ocm/cache")
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	cctx := octx.ConfigContext()
-
-	_, err = cctx.ApplyData(data, runtime.DefaultYAMLEncoding, "ocmconfig")
-	if err != nil {
-		log.Fatal(err)
-	}
+	cacheattr.Set(octx, cache)
 
 	wasm, err := os.ReadFile(os.Args[1])
 	if err != nil {
@@ -128,10 +123,11 @@ func main() {
 	//     "test":         "this-is-a-label",
 	//     "another-test": "this-is-a-label",
 	// }
+	config := map[string]string{}
 
-	config := map[string]string{
-		"prefix": "ocm://",
-	}
+	// config := map[string]string{
+	//     "prefix": "ocm://",
+	// }
 
 	configBytes, err := json.Marshal(config)
 	if err != nil {

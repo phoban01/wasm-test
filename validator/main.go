@@ -12,11 +12,11 @@ import (
 
 func main() {
 	wapc.RegisterFunctions(wapc.Functions{
-		"handler": label,
+		"handler": validator,
 	})
 }
 
-func label(payload []byte) ([]byte, error) {
+func validator(payload []byte) ([]byte, error) {
 	var config map[string]string
 	if err := json.Unmarshal(payload, &config); err != nil {
 		return nil, err
@@ -40,23 +40,20 @@ func label(payload []byte) ([]byte, error) {
 			return errors.New("couldn't parse metadata")
 		}
 
-		_, ok = m["labels"].(map[string]string)
+		labels, ok := m["labels"].(map[string]string)
 		if !ok {
-			m["labels"] = make(map[string]string)
+			return errors.New("not valid")
 		}
 
-		l := m["labels"].(map[string]string)
+		for k := range config {
 
-		for k, v := range config {
-			l[k] = v
+
+			if _, ok := labels[k]; !ok {
+				return errors.New("not valid")
+			}
 		}
 
-		result, err := json.Marshal(resource)
-		if err != nil {
-			return err
-		}
-
-		return os.WriteFile(path, result, fs.ModeType)
+		return nil
 	})
 	if err != nil {
 		return nil, err
