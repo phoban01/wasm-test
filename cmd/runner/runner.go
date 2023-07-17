@@ -2,11 +2,9 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -16,6 +14,7 @@ import (
 	"github.com/mandelsoft/vfs/pkg/projectionfs"
 	"github.com/open-component-model/ocm/pkg/common"
 	"github.com/open-component-model/ocm/pkg/common/accessio"
+	"github.com/open-component-model/ocm/pkg/contexts/credentials/repositories/dockerconfig"
 	"github.com/open-component-model/ocm/pkg/contexts/oci/attrs/cacheattr"
 	"github.com/open-component-model/ocm/pkg/contexts/ocm"
 	"github.com/open-component-model/ocm/pkg/contexts/ocm/accessmethods/localblob"
@@ -25,10 +24,9 @@ import (
 	"github.com/open-component-model/ocm/pkg/contexts/ocm/download/handlers/dirtree"
 	ocmreg "github.com/open-component-model/ocm/pkg/contexts/ocm/repositories/ocireg"
 	"github.com/tetratelabs/wazero"
-	"github.com/wapc/wapc-go"
-	wazeroEngine "github.com/wapc/wapc-go/engines/wazero"
+	"github.com/tetratelabs/wazero/api"
+	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 	"gopkg.in/yaml.v2"
-	"k8s.io/client-go/kubernetes/scheme"
 )
 
 func main() {
@@ -43,6 +41,12 @@ func main() {
 
 	wasm, err := os.ReadFile(os.Args[1])
 	if err != nil {
+		log.Fatal(err)
+	}
+
+	spec := dockerconfig.NewRepositorySpec("~/.docker/config.json", true)
+
+	if _, err := octx.CredentialsContext().RepositoryForSpec(spec); err != nil {
 		log.Fatal(err)
 	}
 
@@ -79,65 +83,78 @@ func main() {
 		log.Fatal(err)
 	}
 
-	filepath.WalkDir(dir, func(p string, d os.DirEntry, e error) error {
-		if d.IsDir() {
-			return nil
-		}
-		data, err := os.ReadFile(p)
-		if err != nil {
-			return err
-		}
-		decode := scheme.Codecs.UniversalDeserializer().Decode
-		obj, _, err := decode(data, nil, nil)
-		b, err := json.Marshal(obj)
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(p, b, fs.ModeType)
-	})
-
-	engine := wazeroEngine.Engine()
-
-	module, err := engine.New(ctx, makeHost(cv, dir), wasm, &wapc.ModuleConfig{
-		Logger: wapc.PrintlnLogger,
-		Stdout: os.Stdout,
-		Stderr: os.Stderr,
+	configBytes, err := yaml.Marshal(map[string]string{
+		"prefix": "ocm://",
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer module.Close(ctx)
 
-	module.(*wazeroEngine.Module).WithConfig(func(config wazero.ModuleConfig) wazero.ModuleConfig {
-		conf := wazero.NewFSConfig().WithDirMount(dir, "/data")
-		return config.WithFSConfig(conf).WithSysWalltime()
-	})
+	r := wazero.NewRuntime(ctx)
+	defer r.Close(ctx)
 
-	instance, err := module.Instantiate(ctx)
+	wasi_snapshot_preview1.MustInstantiate(ctx, r)
+
+	fsConfig := wazero.NewFSConfig().WithDirMount(dir, "/data")
+	modConfig := wazero.NewModuleConfig().
+		WithStdout(os.Stdout).
+		WithFSConfig(fsConfig)
+
+	builder := r.NewHostModuleBuilder("ocm.software").
+		NewFunctionBuilder().WithFunc(
+		func(ctx context.Context, m api.Module, offset, size uint32) uint64 {
+			mem := m.Memory()
+			data, _ := mem.Read(offset, size)
+
+			res, err := cv.GetResource(ocmmetav1.NewIdentity(string(data)))
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			ref, err := getReference(cv.GetContext(), res)
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			refSize := uint64(len([]byte(ref)))
+			if !mem.Write(offset+size, []byte(ref)) {
+				log.Fatal("could not write ref")
+			}
+
+			return uint64(offset+size)<<32 | refSize
+		}).Export("resolve")
+
+	if _, err := builder.Instantiate(ctx); err != nil {
+		log.Fatal(err)
+	}
+
+	mod, err := r.InstantiateWithConfig(ctx, wasm, modConfig)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer instance.Close(ctx)
 
-	// config := map[string]string{
-	//     "test":         "this-is-a-label",
-	//     "another-test": "this-is-a-label",
-	// }
-	config := map[string]string{}
+	handler := mod.ExportedFunction("handler")
+	malloc := mod.ExportedFunction("malloc")
+	free := mod.ExportedFunction("free")
 
-	// config := map[string]string{
-	//     "prefix": "ocm://",
-	// }
-
-	configBytes, err := json.Marshal(config)
+	configBytesSize := uint64(len(configBytes))
+	results, err := malloc.Call(ctx, configBytesSize)
 	if err != nil {
 		log.Fatal(err)
 	}
+	configPtr := results[0]
+	defer free.Call(ctx, configPtr)
 
-	_, err = instance.Invoke(ctx, "handler", configBytes)
+	if !mod.Memory().Write(uint32(configPtr), configBytes) {
+		log.Fatalf("Memory.Write(%d, %d) out of range of memory size %d",
+			configPtr, configBytesSize, mod.Memory().Size())
+	}
+
+	result, err := handler.Call(ctx, configPtr, configBytesSize)
 	if err != nil {
 		log.Fatal(err)
 	}
+	fmt.Println(result)
 
 	filepath.WalkDir(dir, func(p string, d os.DirEntry, e error) error {
 		if d.IsDir() {
@@ -157,36 +174,10 @@ func main() {
 				return err
 			}
 			fmt.Fprintf(io.Discard, string(result))
-			fmt.Println(string(result))
+			// fmt.Println(string(result))
 		}
 		return nil
 	})
-}
-
-func makeHost(cv ocm.ComponentVersionAccess, dir string) func(ctx context.Context, binding, namespace, operation string, payload []byte) ([]byte, error) {
-	return func(ctx context.Context, binding, namespace, operation string, payload []byte) ([]byte, error) {
-		if binding != "ocm.software" {
-			return nil, errors.New("unrecognised binding")
-		}
-		switch namespace {
-		case "get":
-			switch operation {
-			case "resource":
-				res, err := cv.GetResource(ocmmetav1.NewIdentity(string(payload)))
-				if err != nil {
-					return nil, err
-				}
-
-				ref, err := getReference(cv.GetContext(), res)
-				if err != nil {
-					return nil, err
-				}
-
-				return []byte(ref), nil
-			}
-		}
-		return nil, errors.New("unrecognised namespace")
-	}
 }
 
 func getReference(octx ocm.Context, res ocm.ResourceAccess) (string, error) {

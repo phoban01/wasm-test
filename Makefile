@@ -1,6 +1,6 @@
 .PHONY: localizer
 localizer:
-	tinygo build -o bin/localizer -no-debug -panic=trap -scheduler=none -target wasi ./localizer
+	tinygo build -o ./bin/localizer -no-debug -panic=trap -scheduler=none -target wasi ./localizer
 
 .PHONY: labeler
 labeler:

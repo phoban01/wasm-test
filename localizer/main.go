@@ -1,35 +1,52 @@
 package main
 
+// #include <stdlib.h>
+import "C"
+
 import (
 	"bufio"
 	"bytes"
-	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"unsafe"
 
-	wapc "github.com/wapc/wapc-guest-tinygo"
+	"gopkg.in/yaml.v2"
 )
 
-func main() {
-	wapc.RegisterFunctions(wapc.Functions{
-		"handler": localize,
-	})
+func main() {}
+
+func resolve(resource []byte) []byte {
+	ptr, size := stringToPtr(string(resource))
+	result := _resolve(ptr, size)
+	resultPtr := uint32(result >> 32)
+	resultSize := uint32(result & 0xffffffff)
+	return []byte(ptrToString(resultPtr, resultSize))
 }
 
-func localize(payload []byte) ([]byte, error) {
+//go:wasmimport ocm.software resolve
+func _resolve(ptr, size uint32) uint64
+
+//export handler
+func handler(configPtr, configSize uint32) uint32 {
+	payload := []byte(ptrToString(configPtr, configSize))
+
 	var config map[string]string
-	if err := json.Unmarshal(payload, &config); err != nil {
-		return nil, err
+	if err := yaml.Unmarshal(payload, &config); err != nil {
+		return 1
 	}
+
 	if _, ok := config["prefix"]; !ok {
-		return nil, errors.New("prefix is required")
+		return 1
 	}
-	err := filepath.WalkDir("/data", func(path string, d fs.DirEntry, e error) error {
+
+	if err := filepath.WalkDir("/data", func(path string, d fs.DirEntry, e error) error {
 		if d.IsDir() {
 			return nil
 		}
+
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return err
@@ -39,13 +56,13 @@ func localize(payload []byte) ([]byte, error) {
 		if err != nil {
 			return err
 		}
+
 		return os.WriteFile(path, data, fs.ModeType)
-	})
-	if err != nil {
-		return nil, err
+	}); err != nil {
+		return 2
 	}
 
-	return nil, nil
+	return 0
 }
 
 type tag struct {
@@ -67,11 +84,14 @@ func subst(prefix []byte, data []byte) ([]byte, error) {
 	replacements := make(map[string][]byte)
 	for scanner.Scan() {
 		word := scanner.Bytes()
+		// need to modify this to work with yaml
+		// rather than json
 		if bytes.Contains(word, prefix) {
 			artifact := parse(prefix, word)
-			resolved, err := wapc.HostCall("ocm.software", "get", "resource", artifact.resource)
-			if err != nil {
-				return nil, err
+			fmt.Fprintln(os.Stdout, artifact.original, string(artifact.resource))
+			resolved := resolve(artifact.resource)
+			if resolved == nil {
+				return nil, errors.New("could not resolve resource")
 			}
 			replacements[artifact.original] = resolved
 		}
@@ -99,4 +119,29 @@ func commaSplitter(data []byte, atEOF bool) (advance int, token []byte, err erro
 	}
 	// Need more data, request another read
 	return 0, nil, nil
+}
+
+// ptrToString returns a string from WebAssembly compatible numeric types
+// representing its pointer and length.
+func ptrToString(ptr uint32, size uint32) string {
+	return unsafe.String((*byte)(unsafe.Pointer(uintptr(ptr))), size)
+}
+
+// stringToPtr returns a pointer and size pair for the given string in a way
+// compatible with WebAssembly numeric types.
+// The returned pointer aliases the string hence the string must be kept alive
+// until ptr is no longer needed.
+func stringToPtr(s string) (uint32, uint32) {
+	ptr := unsafe.Pointer(unsafe.StringData(s))
+	return uint32(uintptr(ptr)), uint32(len(s))
+}
+
+// stringToLeakedPtr returns a pointer and size pair for the given string in a way
+// compatible with WebAssembly numeric types.
+// The pointer is not automatically managed by TinyGo hence it must be freed by the host.
+func stringToLeakedPtr(s string) (uint32, uint32) {
+	size := C.ulong(len(s))
+	ptr := unsafe.Pointer(C.malloc(size))
+	copy(unsafe.Slice((*byte)(ptr), size), s)
+	return uint32(uintptr(ptr)), uint32(size)
 }
