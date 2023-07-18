@@ -1,3 +1,10 @@
+.PHONY: run
+run:
+	./bin/runner ./bin/localizer
+
+.PHONY: build
+build: runner localizer
+
 .PHONY: localizer
 localizer:
 	tinygo build -o ./bin/localizer -no-debug -panic=trap -scheduler=none -target wasi ./localizer
